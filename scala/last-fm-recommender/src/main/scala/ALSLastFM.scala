@@ -46,6 +46,9 @@ object LastFMRecommender {
   }
 
   case class Params(
+    // default parameter definitions for the ALS model. 
+    // user can update these parameters when calling the scala job 
+
     input: String = null,
     alpha: Double = 0.01,
     numIterations: Int = 10,
@@ -54,6 +57,10 @@ object LastFMRecommender {
     implicitPrefs: Boolean = false) extends AbstractParams[Params]
 
   def main(args: Array[String]): Unit = {
+      /*
+        parses user parameters and runs the als model with these parameters 
+        required: input parameter to indicate where the ALS dataset is located. 
+      */
       val defaultParams = Params()
       val parser = new OptionParser[Params]("MovieLensALS") {
       head("ALSLastFM: Basic usage of ALS to create a song recommender with the LASTFM dataset")
@@ -87,12 +94,26 @@ object LastFMRecommender {
       }
 
   def run(params : Params): Unit = {
-
+      /*
+        runs ALS algorithm on the LASTFM dataset. 
+        params: 
+          input - path to LASTFM dataset
+          rank - the rank of the ALS model (5,10,15 generally)
+          numIterations - the number of iterations the ALS model should train 
+          dataLimit - if running locally, might want to limit data to minimise memory issues
+          implicitPrefs - enable if including ratings that aren't explicit user feedback
+        procedure: 
+          filters and aggregates dataset, uses count as a proxy for rating
+          StringIndexer to index users and tracks
+          RobustScaler to scale ratings while staying robust to outliers 
+          runs ALS model using the scaled ratings as labels
+          displays rmse error 
+      */
       val spark = SparkSession.builder() 
                           .master("local") 
                           .appName("ALSLastFM") 
                           .getOrCreate()
-                          
+
       // "../../resources/lastfm-dataset-1K/userid-timestamp-artid-artname-traid-traname.tsv"
       var data_path:String = params.input
       val schema = new StructType()
