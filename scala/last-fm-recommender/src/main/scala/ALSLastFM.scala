@@ -92,6 +92,8 @@ object LastFMRecommender {
                           .master("local") 
                           .appName("ALSLastFM") 
                           .getOrCreate()
+                          
+      // "../../resources/lastfm-dataset-1K/userid-timestamp-artid-artname-traid-traname.tsv"
       var data_path:String = params.input
       val schema = new StructType()
               .add("user_id", StringType, true)
