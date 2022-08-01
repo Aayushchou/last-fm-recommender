@@ -17,6 +17,14 @@ import org.apache.spark.rdd.RDD
 
 object LastFMRecommender {
 
+  /*
+
+    TODO: 
+    1. implement a better evaluation method
+    2. show recommended outputs for K users
+
+  */
+
   abstract class AbstractParams[T: TypeTag] {
 
   private def tag: TypeTag[T] = typeTag[T]
@@ -50,6 +58,7 @@ object LastFMRecommender {
     // user can update these parameters when calling the scala job 
 
     input: String = null,
+    item: String = "track",
     alpha: Double = 0.01,
     numIterations: Int = 10,
     dataLimit: Int = 5000,
@@ -73,6 +82,9 @@ object LastFMRecommender {
       opt[Int]("dataLimit")
         .text(s"Reduce dataset size to this number, default: ${defaultParams.dataLimit} (auto)")
         .action((x, c) => c.copy(dataLimit = x))
+      opt[String]("item")
+        .text(s"Choose weather to recommend artists or tracks, default: ${defaultParams.item} (auto)")
+        .action((x, c) => c.copy(item = x))
       opt[Unit]("implicitPrefs")
         .text("use implicit preference")
         .action((_, c) => c.copy(implicitPrefs = true))
@@ -102,6 +114,7 @@ object LastFMRecommender {
           numIterations - the number of iterations the ALS model should train 
           dataLimit - if running locally, might want to limit data to minimise memory issues
           implicitPrefs - enable if including ratings that aren't explicit user feedback
+          item - whether to recoend artists or tracks, choose between "artist" or "track"
         procedure: 
           filters and aggregates dataset, uses count as a proxy for rating
           StringIndexer to index users and tracks
@@ -116,6 +129,9 @@ object LastFMRecommender {
 
       // "../../resources/lastfm-dataset-1K/userid-timestamp-artid-artname-traid-traname.tsv"
       var data_path:String = params.input
+      var agg_col:String = params.item + "_id"
+      var agg_index:String = params.item + "_index"
+
       val schema = new StructType()
               .add("user_id", StringType, true)
               .add("timestamp", StringType, true)
@@ -129,8 +145,8 @@ object LastFMRecommender {
               .option("sep", "\t")
               .load(data_path)
       val df_filtered = listener_data.drop("timestamp").na.drop()
-      val df_agg = df_filtered.select("user_id", "track_id")
-              .groupBy("user_id", "track_id")
+      val df_agg = df_filtered.select("user_id", agg_col)
+              .groupBy("user_id", agg_col)
               .agg(count("*").alias("count")).orderBy("user_id")
       val df_agg_filtered = df_agg.limit(params.dataLimit)
 
@@ -165,15 +181,15 @@ object LastFMRecommender {
       val tr_full = tr_s.withColumn("rating_as_array", vector_to_array(tr_s("rating")).getItem(0))
       val ts_full = ts_s.withColumn("rating_as_array", vector_to_array(ts_s("rating")).getItem(0))
 
-      val tr_final = tr_full.select("user_index", "track_index", "count","rating_as_array").orderBy("user_index")
-      val ts_final = ts_full.select("user_index", "track_index", "count", "rating_as_array").orderBy("user_index")
+      val tr_final = tr_full.select("user_index", agg_index,"rating_as_array").orderBy("user_index")
+      val ts_final = ts_full.select("user_index", agg_index,"rating_as_array").orderBy("user_index")
 
       val als = new ALS()
           .setRank(params.rank)
           .setAlpha(params.alpha)
           .setMaxIter(params.numIterations)
           .setUserCol("user_index")
-          .setItemCol("track_index")
+          .setItemCol(agg_index)
           .setRatingCol("rating_as_array")
 
       val model = als.fit(tr_final)
@@ -187,7 +203,11 @@ object LastFMRecommender {
         .setPredictionCol("prediction")
 
       val rmse = evaluator.evaluate(predictions)
+
+      model.save("models/als_lastfm")
       println(s"Root-mean-square error = $rmse") 
+      
       }
+      
     }
     
