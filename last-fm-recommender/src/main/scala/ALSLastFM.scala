@@ -1,5 +1,5 @@
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.ml.feature.StringIndexer
+import org.apache.spark.ml.feature.{StringIndexer, IndexToString}
 import org.apache.spark.ml.Pipeline
 import org.apache.spark.ml.recommendation.ALS
 import org.apache.spark.ml.evaluation.RegressionEvaluator
@@ -61,6 +61,7 @@ object LastFMRecommender {
     item: String = "track",
     alpha: Double = 0.01,
     numIterations: Int = 10,
+    numItemsToRecommend: Int = 10,
     dataLimit: Int = 5000,
     rank: Int = 10,
     implicitPrefs: Boolean = false) extends AbstractParams[Params]
@@ -78,6 +79,9 @@ object LastFMRecommender {
         .action((x, c) => c.copy(rank = x))
       opt[Int]("numIterations")
         .text(s"number of iterations, default: ${defaultParams.numIterations}")
+        .action((x, c) => c.copy(numIterations = x))
+      opt[Int]("numItemsToRecommend")
+        .text(s"number of iterations, default: ${defaultParams.numItemsToRecommend}")
         .action((x, c) => c.copy(numIterations = x))
       opt[Int]("dataLimit")
         .text(s"Reduce dataset size to this number, default: ${defaultParams.dataLimit} (auto)")
@@ -126,8 +130,9 @@ object LastFMRecommender {
                           .master("local") 
                           .appName("ALSLastFM") 
                           .getOrCreate()
-
-      // "../../resources/lastfm-dataset-1K/userid-timestamp-artid-artname-traid-traname.tsv"
+      import spark.implicits._
+      
+      // "../resources/lastfm-dataset-1K/userid-timestamp-artid-artname-traid-traname.tsv"
       var data_path:String = params.input
       var agg_col:String = params.item + "_id"
       var agg_index:String = params.item + "_index"
@@ -139,16 +144,14 @@ object LastFMRecommender {
               .add("artist_name", StringType, true)
               .add("track_id", StringType, true)
               .add("track_name", StringType, true)
-      val listener_data = spark.read.option("header", false)
+      val df_filtered = spark.read.option("header", false)
               .schema(schema)
               .format("org.apache.spark.sql.execution.datasources.csv.CSVFileFormat")
               .option("sep", "\t")
-              .load(data_path)
-      val df_filtered = listener_data.drop("timestamp").na.drop()
-      val df_agg = df_filtered.select("user_id", agg_col)
+              .load(data_path).drop("timestamp").na.drop()
+      val df_agg_filtered = df_filtered.select("user_id", agg_col)
               .groupBy("user_id", agg_col)
-              .agg(count("*").alias("count")).orderBy("user_id")
-      val df_agg_filtered = df_agg.limit(params.dataLimit)
+              .agg(count("*").alias("count")).orderBy("user_id").limit(params.dataLimit)
 
 
       val Array(training, test) = df_agg_filtered.randomSplit(Array[Double](0.8, 0.2), 18)
@@ -178,11 +181,14 @@ object LastFMRecommender {
       val tr_s = pipeline.fit(training).transform(training)
       val ts_s = pipeline.fit(training).transform(test)
 
-      val tr_full = tr_s.withColumn("rating_as_array", vector_to_array(tr_s("rating")).getItem(0))
-      val ts_full = ts_s.withColumn("rating_as_array", vector_to_array(ts_s("rating")).getItem(0))
-
-      val tr_final = tr_full.select("user_index", agg_index,"rating_as_array").orderBy("user_index")
-      val ts_final = ts_full.select("user_index", agg_index,"rating_as_array").orderBy("user_index")
+      val tr_final = tr_s.withColumn("rating_as_array", vector_to_array(tr_s("rating"))
+                      .getItem(0))
+                      .select("user_index", agg_index,"rating_as_array")
+                      .orderBy("user_index")
+      val ts_final = ts_s.withColumn("rating_as_array", vector_to_array(ts_s("rating"))
+                      .getItem(0))
+                      .select("user_index", agg_index,"rating_as_array")
+                      .orderBy("user_index")
 
       val als = new ALS()
           .setRank(params.rank)
@@ -207,6 +213,36 @@ object LastFMRecommender {
       model.save("models/als_lastfm")
       println(s"Root-mean-square error = $rmse") 
       
+      // show user recommendations 
+      
+      val userRecs = model.recommendForAllUsers(params.numItemsToRecommend)
+      val firstRec = userRecs
+                        .withColumn("columns",expr("struct(recommendations[0] as rec1) as columns"))
+                        .select("user_index","columns.*").select("user_index", "rec1.*")
+
+  
+      val users = df_agg_filtered.select("user_id").map(_.getString(0)).distinct().collectAsList().toArray().map(_.asInstanceOf[String])
+      val usermap = new IndexToString()
+          .setInputCol("user_index")
+          .setOutputCol("user_id")
+          .setLabels(users)
+
+      val userout = usermap.transform(firstRec)
+
+      val tracks = df_agg_filtered.select("track_id").map(_.getString(0)).distinct().collectAsList().toArray().map(_.asInstanceOf[String])
+      val trackmap = new IndexToString()
+          .setInputCol("track_index")
+          .setOutputCol("track_id")
+          .setLabels(tracks)
+
+      val trackout = trackmap.transform(userout)
+
+      val final_result = trackout.as("results")
+        .join(df_filtered.as("in"), $"results.track_id" === $"in.track_id")
+        .select("results.user_id", "in.track_name", "in.artist_name", "results.rating").distinct()
+
+      println(final_result.show())
+
       }
       
   }
